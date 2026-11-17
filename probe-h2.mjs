@@ -1,0 +1,12 @@
+import { chromium } from 'playwright';
+const b = await chromium.connectOverCDP('http://127.0.0.1:9334');
+const page = await b.contexts()[0].newPage();
+await page.goto(process.argv[2], { waitUntil: 'domcontentloaded' }); await page.waitForTimeout(5000);
+await page.locator('main a[aria-label^="Inviter "], main button[aria-label^="Inviter "]').filter({ visible: true }).first().click();
+await page.waitForTimeout(3500);
+console.log('URL:', page.url());
+const btns = await page.getByRole('button').filter({ visible: true }).evaluateAll((e) => e.map((x) => '[' + (x.getAttribute('aria-label') || '') + '] ' + (x.innerText || '').trim().slice(0, 40)).filter((t) => !/^\[\] $/.test(t)).slice(-14));
+console.log(btns.join('\n'));
+await page.screenshot({ path: 'photos/hippo-invite.png' });
+await page.keyboard.press('Escape'); await page.waitForTimeout(800);
+await page.close(); process.exit(0);

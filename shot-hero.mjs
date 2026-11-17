@@ -1,0 +1,12 @@
+import { chromium } from 'playwright';
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9333');
+const page = await browser.contexts()[0].newPage();
+await page.setViewportSize({ width: 1280, height: 760 });
+await page.goto('http://localhost:3111/', { waitUntil: 'networkidle' });
+await page.screenshot({ path: 'photos/hero-new.png' });
+await page.evaluate(() => document.querySelector('#certifications').scrollIntoView()); await page.waitForTimeout(500);
+await page.screenshot({ path: 'photos/certs-new.png' });
+await page.setViewportSize({ width: 390, height: 1100 });
+await page.goto('http://localhost:3111/', { waitUntil: 'networkidle' });
+await page.screenshot({ path: 'photos/hero-mobile.png' });
+await page.close(); process.exit(0);

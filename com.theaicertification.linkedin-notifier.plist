@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.theaicertification.linkedin-notifier</string>
+  <key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>/Users/pierrecazaban/.local/node/actuel/bin/node notifier.mjs</string></array>
+  <key>WorkingDirectory</key><string>/Users/pierrecazaban/prospection-ambassadeurs</string>
+  <key>StartInterval</key><integer>300</integer>
+  <key>StandardOutPath</key><string>/Users/pierrecazaban/prospection-ambassadeurs/logs/notifier.log</string>
+  <key>StandardErrorPath</key><string>/Users/pierrecazaban/prospection-ambassadeurs/logs/notifier.log</string>
+</dict></plist>

@@ -1,0 +1,16 @@
+import { chromium } from 'playwright';
+import fs from 'node:fs';
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9333');
+const page = browser.contexts()[0].pages().find((p) => p.url().includes('pierre-cazaban-08a839382'));
+const seen = [];
+page.on('response', r => { if (/profile-displayphoto/.test(r.url())) seen.push(r.url()); });
+await page.locator('main img[src*="D4E03AQF3kUxG"]').first().click();
+await page.waitForTimeout(4000);
+const all = await page.evaluate(() => [...document.querySelectorAll('img')].map(i=>({src:i.src,w:i.naturalWidth})).filter(i=>/D4E03AQF3kUxG/.test(i.src)));
+const cands = [...all, ...seen.filter(u=>/D4E03AQF3kUxG/.test(u)).map(src=>({src,w:0}))];
+console.log(cands.map(c=>c.w+' '+c.src.slice(0,140)).join('\n'));
+const best = cands.find(c => /800_800|400_400/.test(c.src)) || cands.sort((a,b)=>b.w-a.w)[0];
+const res = await page.request.get(best.src);
+fs.writeFileSync('photos/ancienne-hd.jpg', await res.body());
+await page.keyboard.press('Escape');
+process.exit(0);

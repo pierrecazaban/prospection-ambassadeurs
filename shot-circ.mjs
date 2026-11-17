@@ -1,0 +1,13 @@
+import { headless } from './hl.mjs';
+const { browser, page } = await headless();
+await page.setViewportSize({ width: 1280, height: 800 });
+await page.goto('http://localhost:3111/', { waitUntil: 'networkidle' });
+await page.evaluate(() => { document.querySelector('.site-header').style.position = 'static'; });
+await page.locator('#certifications').screenshot({ path: 'photos/circ-cert.png', clip: undefined });
+await page.locator('section.section-dark').last().screenshot({ path: 'photos/circ-amb.png' });
+await page.setViewportSize({ width: 390, height: 800 });
+await page.goto('http://localhost:3111/', { waitUntil: 'networkidle' });
+await page.evaluate(() => { document.querySelector('.site-header').style.position = 'static'; });
+const c = page.locator('#certifications'); const b = await c.boundingBox();
+await page.screenshot({ path: 'photos/circ-mob.png', clip: { x: 0, y: b.y, width: 390, height: 760 }, fullPage: true });
+await browser.close();

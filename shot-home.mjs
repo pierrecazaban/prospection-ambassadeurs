@@ -1,0 +1,11 @@
+import { chromium } from 'playwright';
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9333');
+const page = await browser.contexts()[0].newPage();
+await page.setViewportSize({ width: 1280, height: 900 });
+await page.goto('http://localhost:3111/', { waitUntil: 'networkidle' });
+await page.screenshot({ path: 'photos/home1.png' });
+await page.evaluate(() => window.scrollTo(0, 1500)); await page.waitForTimeout(500);
+await page.screenshot({ path: 'photos/home2.png' });
+await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)); await page.waitForTimeout(500);
+await page.screenshot({ path: 'photos/home3.png' });
+await page.close(); process.exit(0);

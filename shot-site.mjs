@@ -1,0 +1,14 @@
+import { chromium } from 'playwright';
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9333');
+const page = await browser.contexts()[0].newPage();
+await page.setViewportSize({ width: 1280, height: 800 });
+await page.goto('http://localhost:3111/', { waitUntil: 'networkidle' });
+await page.screenshot({ path: 'photos/site-home.png', clip: { x: 0, y: 0, width: 1280, height: 260 } });
+await page.goto('http://localhost:3111/call', { waitUntil: 'networkidle' });
+await page.screenshot({ path: 'photos/site-call.png', clip: { x: 0, y: 0, width: 1280, height: 120 } });
+await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)); await page.waitForTimeout(400);
+await page.screenshot({ path: 'photos/site-footer.png' });
+await page.setViewportSize({ width: 390, height: 300 });
+await page.goto('http://localhost:3111/call', { waitUntil: 'networkidle' });
+await page.screenshot({ path: 'photos/site-mobile.png' });
+await page.close(); process.exit(0);

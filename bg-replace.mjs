@@ -1,0 +1,13 @@
+import { chromium } from 'playwright';
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9333');
+const page = browser.contexts()[0].pages().find((p) => p.url().includes('/in/pierre-cazaban'));
+const dlg = () => page.evaluate(() => [...document.querySelectorAll('[role=dialog] button, dialog button, [role=menu] [role=menuitem]')].filter(b=>b.offsetParent).map(b => (b.innerText.trim()||b.getAttribute('aria-label')||'').replace(/\s+/g,' ').slice(0,50)).filter(Boolean));
+await page.locator('main [aria-label="Modifier l’image d’arrière-plan"]').first().click();
+await page.waitForTimeout(2500);
+console.log('1:', await dlg());
+const opener = page.getByText(/Changer la photo|Modifier la photo|Charger une seule photo|Remplacer/).first();
+const [fc] = await Promise.all([page.waitForEvent('filechooser', { timeout: 10000 }), opener.click()]);
+await fc.setFiles('brand/banniere.png');
+await page.waitForTimeout(5000);
+console.log('2:', await dlg());
+process.exit(0);

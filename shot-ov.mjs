@@ -1,0 +1,10 @@
+import { headless } from './hl.mjs';
+const { browser, page } = await headless();
+await page.setViewportSize({ width: 1100, height: 900 });
+await page.goto('http://localhost:3111/zz-ov-preview', { waitUntil: 'networkidle' });
+await page.locator('.ov').screenshot({ path: 'photos/ov.png' });
+await page.locator('.ov-cell').nth(3).hover(); await page.waitForTimeout(300);
+await page.locator('.ov-schools').screenshot({ path: 'photos/ov-hover.png' });
+await page.setViewportSize({ width: 390, height: 900 });
+await page.locator('.ov').screenshot({ path: 'photos/ov-mobile.png' });
+await browser.close();

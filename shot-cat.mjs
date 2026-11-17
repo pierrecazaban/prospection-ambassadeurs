@@ -1,0 +1,13 @@
+import { headless } from './hl.mjs';
+const { browser, page } = await headless();
+await page.setViewportSize({ width: 1280, height: 900 });
+await page.goto('http://localhost:3111/', { waitUntil: 'networkidle' });
+const blocks = page.locator('.hm-blocks');
+await blocks.scrollIntoViewIfNeeded();
+await blocks.screenshot({ path: 'photos/cat-blocks.png' });
+await page.locator('.hm-carousel').screenshot({ path: 'photos/cat-carousel.png' });
+await page.setViewportSize({ width: 390, height: 900 });
+await page.goto('http://localhost:3111/', { waitUntil: 'networkidle' });
+await page.locator('.hm-blocks').scrollIntoViewIfNeeded();
+await page.locator('.hm-blocks').screenshot({ path: 'photos/cat-mobile.png' });
+await browser.close();

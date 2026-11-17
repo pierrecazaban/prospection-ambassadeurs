@@ -1,0 +1,10 @@
+import { chromium } from 'playwright';
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9333');
+const page = browser.contexts()[0].pages().find((p) => p.url().includes('/in/pierre-cazaban/'));
+await page.getByRole('button', { name: 'Enregistrer les modifications' }).last().click();
+await page.waitForTimeout(5000);
+const dlg = await page.evaluate(() => [...document.querySelectorAll('[role=dialog] button, dialog button')].filter(b=>b.offsetParent).map(b => (b.innerText.trim()||b.getAttribute('aria-label')||'').replace(/\s+/g,' ').slice(0,60)).filter(Boolean));
+console.log('dialogue après :', dlg);
+const imgs = await page.evaluate(() => [...document.querySelectorAll('main img')].map(i=>i.src).filter(s=>/profile-displayphoto/.test(s)).slice(0,2));
+console.log('photo profil :', imgs);
+process.exit(0);

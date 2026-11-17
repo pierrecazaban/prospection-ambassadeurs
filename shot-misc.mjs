@@ -1,0 +1,11 @@
+import { chromium } from 'playwright';
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9333');
+const page = await browser.contexts()[0].newPage();
+await page.setViewportSize({ width: 390, height: 760 });
+await page.goto('http://localhost:3111/', { waitUntil: 'networkidle' });
+await page.screenshot({ path: 'photos/m-hero.png' });
+await page.setViewportSize({ width: 1280, height: 800 });
+await page.goto('http://localhost:3111/ecole', { waitUntil: 'networkidle' });
+const n = page.locator('.numbered').first();
+if (await n.count()) { await n.scrollIntoViewIfNeeded(); await n.screenshot({ path: 'photos/numbered.png' }); } else console.log('pas de liste numérotée');
+await page.close(); process.exit(0);

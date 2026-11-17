@@ -1,0 +1,15 @@
+import { chromium } from 'playwright';
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9333');
+const page = await browser.contexts()[0].newPage();
+await page.setViewportSize({ width: 1200, height: 1400 });
+await page.goto('http://localhost:3111/call?ref=thomas-vangelisti', { waitUntil: 'networkidle' });
+await page.screenshot({ path: 'photos/call1.png', fullPage: true });
+await page.locator('fieldset').nth(1).locator('label').first().click();
+await page.fill('#c-first', 'Test'); await page.fill('#c-last', 'Ambassadeur');
+await page.fill('#c-email', 'test@example.com'); await page.fill('#c-school', 'HEC Paris');
+await page.getByRole('button', { name: 'Réserver mon appel' }).click();
+await page.waitForURL(/confirmed/, { timeout: 30000 });
+await page.screenshot({ path: 'photos/call2.png', fullPage: true });
+console.log(page.url());
+await page.close();
+process.exit(0);

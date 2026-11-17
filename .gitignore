@@ -1,0 +1,17 @@
+node_modules/
+chrome-profile/
+compte2/
+logs/
+*.log
+# listes de personnes (étudiants, prospects) et captures : jamais en public
+*.json
+!package.json
+!package-lock.json
+!vps/package.json
+!vps/package-lock.json
+*.csv
+*.csv.*
+*.bak*
+photos/
+.env*
+.cle_*

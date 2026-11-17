@@ -1,0 +1,11 @@
+import { chromium } from 'playwright';
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9333');
+const page = await browser.contexts()[0].newPage();
+await page.goto('http://localhost:3111/call?t=xGKtQiB9', { waitUntil: 'networkidle' });
+console.log('prérempli :', await page.inputValue('#c-first'), '|', await page.inputValue('#c-last'), '|', await page.inputValue('#c-school'));
+await page.locator('fieldset').nth(1).locator('label').first().click();
+await page.fill('#c-email', 'lea@example.com');
+await page.getByRole('button', { name: 'Réserver mon appel' }).click();
+await page.waitForURL(/confirmed/, { timeout: 30000 });
+console.log(page.url());
+await page.close(); process.exit(0);

@@ -1,0 +1,11 @@
+import { chromium } from 'playwright';
+import fs from 'node:fs';
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9333');
+const ctx = browser.contexts()[0];
+const page = await ctx.newPage();
+await page.setViewportSize({ width: 1584, height: 396 });
+await page.setContent(`<html><body style="margin:0">${fs.readFileSync(process.argv[2],'utf8')}</body></html>`);
+await page.waitForTimeout(500);
+await page.screenshot({ path: process.argv[3], clip: { x:0, y:0, width:1584, height:396 } });
+await page.close();
+process.exit(0);

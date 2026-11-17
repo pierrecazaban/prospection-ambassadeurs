@@ -1,0 +1,10 @@
+import { chromium } from 'playwright';
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9333');
+const ctx = browser.contexts()[0];
+const page = ctx.pages().find((p) => p.url().includes('linkedin.com'));
+await page.getByRole('button', { name: /^Vous|^Me\b/ }).first().click().catch(async () => { await page.getByText('Vous', { exact: true }).first().click(); });
+await page.waitForTimeout(1500);
+await page.getByRole('link', { name: /Déconnexion|Sign out/ }).first().click();
+await page.waitForTimeout(5000);
+console.log(page.url());
+process.exit(0);

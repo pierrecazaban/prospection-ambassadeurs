@@ -1,5 +1,5 @@
 // The agent's timetable on the VPS (Paris time), replacing the Mac's launchd jobs.
-//   10:30 Pierre daily · 11:30 Hippolyte daily · every 30 min watch (both) · every 5 min notifier (both)
+//   Pierre's account only: 10:30 daily (15 invitations, 2 reposts) · every 30 min watch · every 5 min notifier
 import { spawn } from 'node:child_process';
 const run = (args, port) => new Promise((done) => {
   const p = spawn('node', args, { env: { ...process.env, CDP_PORT: port }, stdio: 'inherit' });
@@ -7,11 +7,8 @@ const run = (args, port) => new Promise((done) => {
 });
 const jobs = [
   { at: '10:30', args: ['agent.mjs', 'daily'], port: '9333' },
-  { at: '11:30', args: ['agent.mjs', 'daily'], port: '9334' },
   { every: 30, args: ['agent.mjs', 'watch'], port: '9333' },
-  { every: 30, offset: 15, args: ['agent.mjs', 'watch'], port: '9334' },
   { every: 5, args: ['notifier.mjs'], port: '9333' },
-  { every: 5, offset: 2, args: ['notifier.mjs'], port: '9334' },
 ];
 const running = new Set();
 setInterval(async () => {

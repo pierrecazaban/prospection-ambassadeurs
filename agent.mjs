@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
 // LinkedIn prospecting agent, following the plan set in /admin › Prospection.
 //   node agent.mjs daily   → find first-year students, send the day's invitations (no note), one AI repost
+//   node agent.mjs replies → only the messaging page: answers and follow-ups (every 10 minutes, from the VPS crontab)
 //   node agent.mjs watch   → spot accepted invitations and send them the message with their booking link,
 //                             then the video link of new bookings (notifier.mjs)
 // Runs in the prospection Chrome (port 9333, signed in to LinkedIn), in its own tab, at a human pace.
@@ -11,11 +12,19 @@ const mode = process.argv[2] ?? 'watch';
 const here = process.platform === 'linux' ? '/app/state/' : new URL('.', import.meta.url).pathname;
 const who = PORT === '9333' ? 'Pierre' : 'Hippolyte';
 const ME = PORT === '9333' ? /pierre cazaban/i : /hippolyte constantin/i;
-const report = (kind, text) => { print(kind, text); return api('/api/outreach/log', { method: 'POST', body: JSON.stringify({ kind, text: `[${who}] ${text}` }) }).catch(() => {}); };
-const setStatus = (linkedin, status, error = '') => api('/api/outreach/status', { method: 'POST', body: JSON.stringify({ linkedin, status, error }) });
+const report = (kind, text) => { print(kind, text); if (process.env.DRY_RUN) return Promise.resolve(); return api('/api/outreach/log', { method: 'POST', body: JSON.stringify({ kind, text: `[${who}] ${text}` }) }).catch(() => {}); };
+const DRY = !!process.env.DRY_RUN; // test: reads everything, sends and records nothing
+const setStatus = (linkedin, status, error = '') => DRY ? print('[test] statut', linkedin, status, error) : api('/api/outreach/status', { method: 'POST', body: JSON.stringify({ linkedin, status, error }) });
+
+// The watch pass only runs in the daytime (Paris): nobody answers a LinkedIn message at 3 a.m.
+const hour = Number(new Date().toLocaleString('en-GB', { timeZone: 'Europe/Paris', hour: '2-digit', hour12: false }));
+if ((mode === 'watch' || mode === 'replies') && (hour < 9 || hour >= 20) && !process.env.DRY_RUN) process.exit(0);
+// Signed out or restricted: one check every 2 hours is enough until Pierre signs in again (delete the file to retry at once).
+const downFile = here + `deconnecte-${PORT}`;
+if (fs.existsSync(downFile) && Date.now() - fs.statSync(downFile).mtimeMs < 2 * 3600e3) process.exit(0);
 
 const plan = await api('/api/outreach/plan');
-if (plan.config.paused) { print('pause', 'prospection en pause'); process.exit(0); }
+if (plan.config.paused && !DRY) { print('pause', 'prospection en pause'); process.exit(0); }
 
 // One run at a time (the daily run and the 30-minute watch can overlap otherwise).
 const lock = here + `agent-${PORT}.lock`;
@@ -81,11 +90,59 @@ const openThread = async (profileUrl) => {
   if (!href) throw new Error('pas de bouton Message');
   await nav(new URL(href, 'https://www.linkedin.com').href.replace(/&?interop=msgOverlay/, '')); await pause(4000, 6000);
 };
-const signedIn = async () => {
-  await nav('https://www.linkedin.com/feed/'); await pause(3000, 5000);
-  if (/login|checkpoint|authwall|uas/.test(page.url())) { await report('erreur', 'LinkedIn déconnecté : reconnecte-toi dans le Chrome de prospection.'); await page.close(); process.exit(1); }
+const signedIn = async (url = 'https://www.linkedin.com/feed/') => {
+  await nav(url); await pause(3000, 5000);
+  if (/login|checkpoint|authwall|uas/.test(page.url())) {
+    const restricted = await page.getByText(/compte a été restreint|account has been restricted/i).count();
+    fs.writeFileSync(downFile, new Date().toISOString());
+    await report('erreur', restricted ? 'LinkedIn a restreint le compte : l’agent est à l’arrêt.' : 'LinkedIn déconnecté : reconnecte-toi dans le Chrome de prospection.');
+    await page.close(); process.exit(1);
+  }
+  try { fs.unlinkSync(downFile); } catch {}
 };
-await signedIn();
+
+// ---------- conversations: read and written in the messaging page, never through the profiles ----------
+const norm = (t) => String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+const hash = (t) => [...t].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7).toString(36);
+const store = here + 'replies.json';
+const seen = fs.existsSync(store) ? JSON.parse(fs.readFileSync(store, 'utf8')) : {};
+const memo = (p) => (seen[p.linkedin] ??= { done: [], auto: 0, sent: [] });
+const saveSeen = () => fs.writeFileSync(store, JSON.stringify(seen, null, 1));
+// Texts the agent sends: the plan's templates (and the older ones). Any other message of Pierre was typed by hand.
+const tpl = (t) => new RegExp('^' + norm(String(t || '').slice(0, 60).split(/\{(?:prenom|ecole|lien)\}/).map(norm).filter((x) => x.length > 8).sort((a, b) => b.length - a.length)[0] || '\u0000'));
+const isTpl = (re, text) => { const n = norm(text); return re.test(n) || re.test(n.replace(/^(bonjour|hello|salut) \S+ /, '')); };
+const OURS = [tpl(plan.config.message), tpl(plan.config.followUp), tpl(plan.config.inviteNote), /je cherche la personne qui representera/, /^merci pour l ajout/, /je me permets de relancer/, /c est note pour .* voici le lien de la visio/];
+const fill = (t, p) => String(t || '').replaceAll('{prenom}', p.first_name || '').replaceAll('{ecole}', p.school || 'ton école').replaceAll('{lien}', p.link);
+/** The open conversation, oldest first: who wrote, and whether Pierre's lines came from the agent or from his own hands. */
+const readThread = async (p) => {
+  const raw = await page.evaluate(() => {
+    const out = []; let who = '';
+    for (const ev of [...document.querySelectorAll('.msg-s-message-list__event')].slice(-20)) {
+      const name = ev.querySelector('.msg-s-message-group__name')?.textContent?.trim(); if (name) who = name;
+      const body = ev.querySelector('.msg-s-event-listitem__body')?.textContent?.trim();
+      if (body) out.push({ who, text: body });
+    }
+    return out;
+  });
+  const mine = memo(p);
+  return raw.map((h) => {
+    const from = ME.test(h.who) ? 'pierre' : 'student';
+    return { from, text: h.text, byHand: from === 'pierre' && !OURS.some((re) => isTpl(re, h.text)) && !mine.sent.includes(hash(h.text)) };
+  });
+};
+/** Types and sends in the open conversation, then checks the message really shows up in it. */
+const sendHere = async (p, text) => {
+  if (DRY) { print('[test] aurait envoyé à', p.name, ':', text); return; }
+  const box = page.locator('.msg-form__contenteditable[contenteditable="true"], div[role="textbox"][contenteditable="true"]').last();
+  await box.waitFor({ timeout: 15000 });
+  await box.click(); await page.keyboard.insertText(text); await pause(1200, 2200);
+  await page.locator('button.msg-form__send-button, button[type="submit"]').filter({ visible: true }).last().click();
+  await pause(3000, 4500);
+  const last = (await readThread(p)).pop();
+  if (!last || last.from !== 'pierre' || norm(last.text).slice(0, 40) !== norm(text).slice(0, 40)) throw new Error('message non confirmé dans la conversation');
+  memo(p).sent.push(hash(last.text)); memo(p).sent.push(hash(text)); saveSeen();
+};
+if (mode !== 'replies') await signedIn(); // the replies pass checks the session on the messaging page itself
 
 const cards = () => page.evaluate(() => {
   const seen = new Set(); const r = [];
@@ -208,7 +265,7 @@ if ((mode === 'daily' || mode === 'list') && !(PORT !== '9333' && mode === 'list
 
   // 3. One AI repost from a reliable source (latest post not reposted yet)
   if (mode === 'daily' && plan.repostsLeft > 0) {
-    const SOURCES = ['anthropicresearch', 'openai', 'googledeepmind', 'mistralai', 'aiatmeta'];
+    const SOURCES = ['anthropicresearch', 'openai', 'googledeepmind', 'mistralai']; // aiatmeta: its page triggers LinkedIn's anti-bot check
     const doneFile = here + 'reposts.json';
     const done = fs.existsSync(doneFile) ? JSON.parse(fs.readFileSync(doneFile, 'utf8')) : [];
     const start = new Date().getDate() % SOURCES.length;
@@ -231,13 +288,13 @@ if ((mode === 'daily' || mode === 'list') && !(PORT !== '9333' && mode === 'list
   }
 }
 
-// ---------- watch: acceptances → message with the booking link ----------
+// ---------- watch: acceptances → first message (unless a conversation is already going on) ----------
 if (mode === 'watch' || mode === 'daily') {
   // invited (maybe accepted since) + accepted whose message failed last time (retried)
   const invited = [...(await api('/api/outreach/queue?status=invited&limit=200')).prospects, ...(await api('/api/outreach/queue?status=accepted&limit=50')).prospects];
   if (invited.length && plan.messagesLeft > 0) {
     await nav('https://www.linkedin.com/mynetwork/invite-connect/connections/'); await pause(5000, 8000);
-    for (let i = 0; i < 12; i++) { // the newest connections first: scroll (and « Afficher plus ») far enough to cover a few weeks
+    for (let i = 0; i < 6; i++) { // the newest connections first
       await page.mouse.wheel(0, 3000); await pause(1200, 2000);
       await page.getByRole('button', { name: /Afficher plus de résultats|Show more results/ }).filter({ visible: true }).first().click({ timeout: 2000 }).catch(() => {});
     }
@@ -245,82 +302,107 @@ if (mode === 'watch' || mode === 'daily') {
     const connections = new Set((await page.evaluate(() => [...document.querySelectorAll('main a[href*="/in/"]')].map((a) => a.href.split('?')[0]))).map(slug));
     let messaged = 0;
     for (const p of invited) {
-      if (messaged >= plan.messagesLeft) break;
+      if (messaged >= Math.min(plan.messagesLeft, 8)) break; // a few per pass: each one opens a profile
       if (p.status !== 'accepted' && !connections.has(slug(p.linkedin))) continue; // accepted = already known as a connection
       await setStatus(p.linkedin, 'accepted');
       try {
         await openThread(p.linkedin);
-        const box = page.locator('.msg-form__contenteditable[contenteditable="true"], div[role="textbox"][contenteditable="true"]').last();
-        await box.waitFor({ timeout: 15000 });
-        const text = plan.config.message.replaceAll('{prenom}', p.first_name || '').replaceAll('{ecole}', p.school || 'ton école').replaceAll('{lien}', p.link);
-        await box.click(); await page.keyboard.insertText(text); await pause(1000, 1800);
-        await page.locator('button.msg-form__send-button, button[type="submit"]').filter({ visible: true }).last().click();
-        await pause(2500, 3500);
+        const turns = await readThread(p);
+        // The student already answered the invitation note, Pierre wrote by hand, or the message is already there:
+        // no template on top of a real conversation. The replies pass below takes it from here.
+        if (turns.some((t) => t.from === 'student' || t.byHand) || turns.some((t) => t.from === 'pierre' && (isTpl(tpl(plan.config.message), t.text) || /^merci pour l ajout/.test(norm(t.text))))) {
+          await setStatus(p.linkedin, 'messaged');
+          await report('message', `Conversation déjà en cours avec ${p.name} (${p.school}) : pas de message type envoyé`);
+        } else {
+          await sendHere(p, fill(plan.config.message, p));
+          await setStatus(p.linkedin, 'messaged'); messaged++;
+          await report('message', `Premier message envoyé à ${p.name} (${p.school})`);
+        }
         await closeChats();
-        await setStatus(p.linkedin, 'messaged'); messaged++;
-        await report('message', `Lien de réservation envoyé à ${p.name} (${p.school})`);
       } catch (e) { await setStatus(p.linkedin, 'accepted', 'message non envoyé : ' + String(e.message || e).split('\n')[0]); }
       await pause(20000, 45000);
     }
   }
 }
 
-// ---------- watch: questions in reply → Claude drafts the answer (or hands it to Pierre) ----------
-if (mode === 'watch') {
-  const store = here + 'replies.json';
-  const seen = fs.existsSync(store) ? JSON.parse(fs.readFileSync(store, 'utf8')) : {};
-  const hash = (t) => [...t].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7).toString(36);
-  const talking = [
-    ...(await api('/api/outreach/queue?status=messaged&limit=100')).prospects,
-    ...(await api('/api/outreach/queue?status=booked&limit=50')).prospects,
-  ].filter((p) => Date.now() - new Date(p.messaged_at || p.found_at).getTime() < 21 * 864e5).slice(0, 12);
-  for (const p of talking) {
-    const mine = seen[p.linkedin] ?? { done: [], auto: 0 };
+// ---------- watch: replies and follow-ups, from the messaging page (one page, no profile visit) ----------
+if (mode === 'watch' || mode === 'replies') {
+  const recent = (p) => Date.now() - new Date(p.messaged_at || p.invited_at || p.found_at).getTime() < 30 * 864e5;
+  const all = [];
+  for (const [st, n] of [['messaged', 150], ['booked', 50], ['accepted', 50], ['invited', 200]]) all.push(...(await api(`/api/outreach/queue?status=${st}&limit=${n}`)).prospects.filter(recent));
+  const byName = new Map(all.map((p) => [norm(p.name), p]));
+
+  await signedIn('https://www.linkedin.com/messaging/'); await pause(3000, 5000);
+  const list = page.locator('.msg-conversations-container__conversations-list').first();
+  for (let i = 0; i < 6; i++) { await list.evaluate((el) => el.scrollBy(0, 1500)).catch(() => {}); await pause(900, 1500); }
+  await list.evaluate((el) => el.scrollTo(0, 0)).catch(() => {});
+  const items = page.locator('li.msg-conversation-listitem');
+  // LinkedIn only fills a conversation's line once it is on screen: bring each one into view before reading it.
+  const rows = [];
+  for (let i = 0, n = await items.count(); i < n && i < 60; i++) {
+    const li = items.nth(i);
+    await li.scrollIntoViewIfNeeded().catch(() => {}); await pause(250, 500);
+    rows.push(await li.evaluate((el, i) => ({
+      i, name: el.querySelector('.msg-conversation-listitem__participant-names')?.innerText?.trim() || '',
+      snippet: el.querySelector('.msg-conversation-card__message-snippet, .msg-conversation-card__message-snippet-body')?.innerText?.trim() || '',
+    }), i));
+  }
+  const complete = rows.length >= 5 && rows.every((r) => r.name);
+  if (!rows.length) await report('erreur', 'Messagerie LinkedIn illisible : aucune conversation trouvée (la page a peut-être changé).');
+  const inList = new Set(rows.map((r) => norm(r.name)));
+  const due = (p) => p.status === 'messaged' && !p.followed_up_at && plan.config.followUpAfterDays > 0
+    && (Date.now() - new Date(p.messaged_at).getTime()) / 864e5 >= plan.config.followUpAfterDays;
+
+  let opened = 0;
+  for (const row of rows) {
+    const p = byName.get(norm(row.name));
+    if (!p) continue;
+    const theirs = !/^(Vous|You)\s*:/.test(row.snippet); // the student wrote last
+    if (!theirs && !due(p)) continue; // nothing to do in this conversation: it is not even opened
+    if (opened >= 15) break;
+    const mine = memo(p);
     try {
-      await openThread(p.linkedin);
-      const history = await page.evaluate(() => {
-        const out = []; let who = '';
-        const list = [...document.querySelectorAll('.msg-s-message-list__event')].slice(-15);
-        for (const ev of list) {
-          const name = ev.querySelector('.msg-s-message-group__name')?.textContent?.trim();
-          if (name) who = name;
-          const body = ev.querySelector('.msg-s-event-listitem__body')?.textContent?.trim();
-          if (body) out.push({ who, text: body });
-        }
-        return out;
-      });
-      const turns = history.map((h) => ({ from: ME.test(h.who) ? 'pierre' : 'student', text: h.text }));
+      await items.nth(row.i).scrollIntoViewIfNeeded().catch(() => {});
+      await items.nth(row.i).locator('.msg-conversation-listitem__link, a, .msg-conversation-card').first().click();
+      await pause(3000, 5000); opened++;
+      const turns = await readThread(p);
       const last = turns[turns.length - 1];
-      // One follow-up when the student never answered after followUpAfterDays
-      const days = (Date.now() - new Date(p.messaged_at || p.found_at).getTime()) / 864e5;
-      if (last && last.from === 'pierre' && !turns.some((t) => t.from === 'student') && turns.filter((t) => t.from === 'pierre').length === 1 && !p.followed_up_at
-          && plan.config.followUpAfterDays > 0 && days >= plan.config.followUpAfterDays && p.status === 'messaged') {
-        const text = plan.config.followUp.replaceAll('{prenom}', p.first_name || '').replaceAll('{ecole}', p.school || 'ton école').replaceAll('{lien}', p.link);
-        const box = page.locator('.msg-form__contenteditable[contenteditable="true"], div[role="textbox"][contenteditable="true"]').last();
-        await box.click(); await page.keyboard.insertText(text); await pause(1200, 2000);
-        await page.locator('button.msg-form__send-button, button[type="submit"]').filter({ visible: true }).last().click(); await pause(2000, 3000);
-        await api('/api/outreach/followup', { method: 'POST', body: JSON.stringify({ linkedin: p.linkedin }) });
-        await report('relance', `Relance envoyée à ${p.name} (${p.school})`);
-        await closeChats(); continue;
-      }
-      if (!last || last.from !== 'student') { await closeChats(); continue; }
-      const id = hash(last.text);
-      if (mine.done.includes(id)) { await page.keyboard.press('Escape').catch(() => {}); continue; }
-      mine.done.push(id);
-      if (mine.auto >= 3) { await report('à traiter', `${p.name} (${p.school}) a répondu, 3 réponses auto déjà envoyées : à toi de jouer`); }
-      else {
-        const r = await api('/api/outreach/reply', { method: 'POST', body: JSON.stringify({ linkedin: p.linkedin, name: p.name, firstName: p.first_name, school: p.school, link: p.link, history: turns }) });
-        if (!r.needsHuman && r.reply) {
-          const box = page.locator('.msg-form__contenteditable[contenteditable="true"], div[role="textbox"][contenteditable="true"]').last();
-          await box.click(); await page.keyboard.insertText(r.reply); await pause(1500, 2500);
-          await page.locator('button.msg-form__send-button, button[type="submit"]').filter({ visible: true }).last().click(); await pause(2000, 3000);
-          mine.auto += 1;
+      if (!last) continue;
+
+      // One follow-up when the student never wrote back (the invitation note also shows here as a message of Pierre)
+      if (last.from === 'pierre') {
+        if (due(p) && !turns.some((t) => t.from === 'student' || t.byHand)) {
+          await sendHere(p, fill(plan.config.followUp, p));
+          if (!DRY) await api('/api/outreach/followup', { method: 'POST', body: JSON.stringify({ linkedin: p.linkedin }) });
+          await report('relance', `Relance envoyée à ${p.name} (${p.school})`);
         }
+        continue;
       }
-      seen[p.linkedin] = mine; fs.writeFileSync(store, JSON.stringify(seen, null, 1));
-      await closeChats();
+
+      const id = hash(last.text);
+      if (mine.done.includes(id)) continue;
+      mine.done.push(id);
+      // Pierre is talking to this student himself: the agent stays out and tells him.
+      if (turns.some((t) => t.byHand)) await report('à traiter', `${p.name} (${p.school}) t’a répondu dans une conversation que tu mènes toi-même : « ${last.text.slice(0, 200)} »`);
+      else if (mine.auto >= 3) await report('à traiter', `${p.name} (${p.school}) a répondu, 3 réponses auto déjà envoyées : à toi de jouer. « ${last.text.slice(0, 200)} »`);
+      else {
+        if (DRY) { print('[test] réponse à rédiger pour', p.name, '←', last.text.slice(0, 120)); continue; }
+        const r = await api('/api/outreach/reply', { method: 'POST', body: JSON.stringify({ linkedin: p.linkedin, name: p.name, firstName: p.first_name, school: p.school, link: p.link, history: turns.map(({ from, text }) => ({ from, text })) }) });
+        if (!r.needsHuman && r.reply) { await sendHere(p, r.reply); mine.auto += 1; }
+        // An answer to the invitation note counts as a conversation: no template message on top of it later.
+        if (!r.declined && !r.contact && (p.status === 'invited' || p.status === 'accepted')) await setStatus(p.linkedin, 'messaged');
+      }
+      if (!DRY) saveSeen();
     } catch (e) { print('réponses', p.name, String(e.message || e).split('\n')[0]); }
     await pause(8000, 15000);
+  }
+
+  // Marked “messaged” but no conversation exists: the message never left. Back to “accepted”, the next pass sends it
+  // (after checking the conversation, so nothing is ever sent twice).
+  if (complete) for (const p of all) {
+    if (p.status === 'messaged' && !inList.has(norm(p.name)) && Date.now() - new Date(p.messaged_at).getTime() < 14 * 864e5 && rows.length < 40) {
+      await setStatus(p.linkedin, 'accepted', 'message introuvable dans la messagerie : renvoi au prochain passage');
+    }
   }
 }
 

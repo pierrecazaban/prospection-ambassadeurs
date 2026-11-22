@@ -1,7 +1,8 @@
 import { execSync } from 'node:child_process';
 // LinkedIn prospecting agent, following the plan set in /admin › Prospection.
-//   node agent.mjs daily   → find first-year students, send the day's invitations (no note), one AI repost
-//   node agent.mjs replies → only the messaging page: answers and follow-ups (every 10 minutes, from the VPS crontab)
+//   node agent.mjs daily   → first wave of invitations, withdrawals, search of 1st-to-3rd-year students, AI reposts
+//   node agent.mjs invite  → a later wave of the day's invitations, nothing else (the day is spread over 3 waves)
+//   node agent.mjs replies → only the messaging page: answers and follow-ups (by hand; the watch pass does it too)
 //   node agent.mjs watch   → spot accepted invitations and send them the message with their booking link,
 //                             then the video link of new bookings (notifier.mjs)
 // Runs in the prospection Chrome (port 9333, signed in to LinkedIn), in its own tab, at a human pace.
@@ -23,14 +24,36 @@ if ((mode === 'watch' || mode === 'replies') && (hour < 9 || hour >= 20) && !pro
 const downFile = here + `deconnecte-${PORT}`;
 if (fs.existsSync(downFile) && Date.now() - fs.statSync(downFile).mtimeMs < 2 * 3600e3) process.exit(0);
 
+// A human does not open LinkedIn at :00 and :30 sharp: each scheduled pass starts a few minutes late, never the same.
+if (!DRY && !process.env.NO_JITTER && process.platform === 'linux') await pause(0, mode === 'watch' ? 11 * 60e3 : 6 * 60e3);
+
 const plan = await api('/api/outreach/plan');
 if (plan.config.paused && !DRY) { print('pause', 'prospection en pause'); process.exit(0); }
 
 // One run at a time (the daily run and the 30-minute watch can overlap otherwise).
 const lock = here + `agent-${PORT}.lock`;
-if (fs.existsSync(lock) && Date.now() - fs.statSync(lock).mtimeMs < 2 * 3600e3) { print('verrou', 'un autre passage tourne déjà'); process.exit(0); }
+const busy = () => fs.existsSync(lock) && Date.now() - fs.statSync(lock).mtimeMs < 2 * 3600e3;
+// A wave of invitations waits for the pass in progress (up to 25 min) instead of being lost; a watch pass just skips its turn.
+if (mode === 'daily' || mode === 'invite') for (let i = 0; i < 50 && busy(); i++) await pause(30000, 30000);
+if (busy()) { if (mode !== 'watch' && mode !== 'replies') print('verrou', 'un autre passage tourne déjà'); process.exit(0); }
 fs.writeFileSync(lock, String(process.pid));
 process.on('exit', () => { try { fs.unlinkSync(lock); } catch {} });
+
+// Profile pages opened today, all passes together. LinkedIn restricted the account on 22/11 for viewing too many
+// profiles: past the day's budget the agent opens no more profile (messages and replies do not need any).
+const VISITS_MAX = Number(process.env.VISITS_MAX || 60);
+const visitsFile = here + 'visites.json';
+const dayKey = new Date().toLocaleDateString('fr-CA', { timeZone: 'Europe/Paris' });
+const visits = (() => { try { const v = JSON.parse(fs.readFileSync(visitsFile, 'utf8')); return v.day === dayKey ? v : { day: dayKey, n: 0, warned: false }; } catch { return { day: dayKey, n: 0, warned: false }; } })();
+class Budget extends Error {}
+const visit = async (url) => {
+  if (visits.n >= VISITS_MAX) {
+    if (!visits.warned) { visits.warned = true; fs.writeFileSync(visitsFile, JSON.stringify(visits)); await report('limite', `Budget de ${VISITS_MAX} visites de profil atteint aujourd’hui : plus aucun profil ouvert jusqu’à demain.`); }
+    throw new Budget('budget de visites de profil atteint');
+  }
+  visits.n++; if (!DRY) fs.writeFileSync(visitsFile, JSON.stringify(visits));
+  await nav(url);
+};
 
 const b = await chrome();
 const ctx = b.contexts()[0];
@@ -84,10 +107,8 @@ const closeChats = async () => {
   for (const b of await page.locator('button[aria-label^="Fermer votre discussion"], button[aria-label^="Close your conversation"]').filter({ visible: true }).all()) await b.click().catch(() => {});
 };
 // Opens the conversation with a profile as a full page (the small messaging overlay now sits in a shadow DOM that swallows clicks).
-const openThread = async (profileUrl) => {
-  await nav(profileUrl); await pause(3500, 5500); await closeChats();
-  const href = await page.locator('main section').first().locator('a').filter({ hasText: /^Message$/ }).filter({ visible: true }).first().getAttribute('href', { timeout: 15000 });
-  if (!href) throw new Error('pas de bouton Message');
+// `href` = the « Message » link of that person on the connections page: no profile is opened to write to someone.
+const openThread = async (href) => {
   await nav(new URL(href, 'https://www.linkedin.com').href.replace(/&?interop=msgOverlay/, '')); await pause(4000, 6000);
 };
 const signedIn = async (url = 'https://www.linkedin.com/feed/') => {
@@ -155,9 +176,10 @@ const cards = () => page.evaluate(() => {
 });
 
 // ---------- daily: find, invite, repost  ·  list: only build the whole target list now ----------
-if ((mode === 'daily' || mode === 'list') && !(PORT !== '9333' && mode === 'list')) {
-  const FIRST = /(1(è|e)re|premi(è|e)re|1st|first)[- ]?(ann(é|e)e|year)|\b1A\b|bachelor 1\b|\bB1\b|\bPGE ?1\b|freshman/i;
-  const NOT = /master|msc|\bM1\b|dscg|mba|infirmi|[2-5](è|e)me ann(é|e)e|\bL[23]\b|ieseg|iéseg|escp|edhec|skema|emlyon|neoma|essca|essec|polytechnique|a étudié|alumni|diplôm|enseignant|professeur|recruteur/i;
+if ((mode === 'daily' || mode === 'list' || mode === 'invite') && !(PORT !== '9333' && mode === 'list')) {
+  // Target (22/11): 1st to 3rd year (was 1st year only). 4th and 5th years, masters, graduates and staff stay out.
+  const FIRST = /(1 ?(è|e)re|premi(è|e)re|2 ?(è|e)?me|deuxi(è|e)me|seconde|3 ?(è|e)?me|troisi(è|e)me|1st|first|2nd|second|3rd|third)[- ]?(ann(é|e)e|year)|\b[123]A\b|bachelor ?[123]\b|\b[BL][123]\b|\bBBA ?[123]\b|\bBUT ?[123]\b|\bPGE ?1\b|freshman|sophomore/i;
+  const NOT = /master|msc|\bM[12]\b|dscg|mba|infirmi|[4-9] ?(è|e)?me ann(é|e)e|quatri(è|e)me|cinqui(è|e)me|4th|5th|fourth|fifth|\b[45]A\b|\bB4\b|\bBBA ?4\b|\bPGE ?[23]\b|ieseg|iéseg|escp|edhec|skema|emlyon|neoma|essca|essec|polytechnique|a étudié|alumni|diplôm|enseignant|professeur|recruteur/i;
   const word = (s) => s.split(/\s+/).find((w) => w.length > 2) ?? s;
 
   const queue = mode === 'list' ? [] : (await api('/api/outreach/queue?status=found&limit=200')).prospects;
@@ -165,11 +187,13 @@ if ((mode === 'daily' || mode === 'list') && !(PORT !== '9333' && mode === 'list
   // 2. The day's invitations, without a note
   let sent = 0;
   // Each account sends its own share; the second one takes the next students in the queue.
-  const share = Math.min(plan.invitesLeft, Number(process.env.PER_ACCOUNT || 15));
+  // The day's quota is the one set in /admin (no hidden cap any more), sent in 3 waves: a third each, the last takes what is left.
+  const wave = Math.ceil(plan.config.invitesPerDay / 3);
+  const share = process.env.LAST_WAVE ? plan.invitesLeft : Math.min(plan.invitesLeft, wave);
   // The accounts run one after the other (10:30 Pierre, 11:30 Hippolyte): each takes the next students still waiting.
   for (const p of queue.slice(0, share)) {
     try {
-      await nav(p.linkedin); await pause(4000, 6500); await closeChats();
+      await visit(p.linkedin); await pause(4000, 6500); await closeChats();
       if (await page.getByText(/avez atteint la limite hebdomadaire|weekly invitation limit/i).count()) { await report('limite', 'LinkedIn signale la limite hebdomadaire : arrêt des invitations.'); break; }
       const connect = page.locator(`main a[aria-label^="Inviter ${key(p.name)}"], main button[aria-label^="Inviter ${key(p.name)}"]`).filter({ visible: true }).first();
       if (!(await connect.count())) {
@@ -202,20 +226,20 @@ if ((mode === 'daily' || mode === 'list') && !(PORT !== '9333' && mode === 'list
       await pause(2500, 3500);
       if (await page.getByText(/limite hebdomadaire|weekly invitation limit/i).count()) { await report('limite', 'LinkedIn signale la limite hebdomadaire : arrêt.'); break; }
       // Proof it went out: the profile now shows the invitation as pending
-      await nav(p.linkedin); await pause(3500, 5000);
+      await visit(p.linkedin); await pause(3500, 5000);
       if (!(await isPending(p.name))) throw new Error('invitation non confirmée par LinkedIn');
       await setStatus(p.linkedin, 'invited'); sent++;
-    } catch (e) { await setStatus(p.linkedin, 'failed', String(e.message || e).split('\n')[0]); await page.keyboard.press('Escape').catch(() => {}); }
+    } catch (e) { if (e instanceof Budget) break; await setStatus(p.linkedin, 'failed', String(e.message || e).split('\n')[0]); await page.keyboard.press('Escape').catch(() => {}); }
     await pause(40000, 90000);
   }
 
   // 2b. Withdraw invitations still pending after withdrawAfterDays (a pile of ignored invitations hurts the account)
-  if (mode === 'daily' && plan.config.withdrawAfterDays > 0) {
+  if (mode === 'daily' && plan.config.withdrawAfterDays > 0) withdrawals: {
     const old = (await api('/api/outreach/queue?status=invited&limit=200')).prospects
-      .filter((p) => Date.now() - new Date(p.invited_at).getTime() > plan.config.withdrawAfterDays * 864e5).slice(0, 15);
+      .filter((p) => Date.now() - new Date(p.invited_at).getTime() > plan.config.withdrawAfterDays * 864e5).slice(0, 8);
     for (const p of old) {
       try {
-        await nav(p.linkedin); await pause(4000, 6000); await closeChats();
+        await visit(p.linkedin); await pause(4000, 6000); await closeChats();
         let pending = page.locator(`main [aria-label^="En attente"][aria-label*="${key(p.name)}"], main [aria-label^="Pending"][aria-label*="${key(p.name)}"]`).filter({ visible: true }).first();
         if (!(await pending.count())) {
           const more = page.locator('main button[aria-label="Plus"], main button[aria-label="More"]').filter({ visible: true }).first();
@@ -227,15 +251,15 @@ if ((mode === 'daily' || mode === 'list') && !(PORT !== '9333' && mode === 'list
         await page.getByRole('button', { name: /^Retirer$|^Withdraw$/ }).filter({ visible: true }).last().click(); await pause(2000, 3000);
         await setStatus(p.linkedin, 'withdrawn');
         await report('retrait', `Invitation retirée (sans réponse depuis ${plan.config.withdrawAfterDays} jours) : ${p.name}`);
-      } catch (e) { print('retrait', p.name, String(e.message || e).split('\n')[0]); await page.keyboard.press('Escape').catch(() => {}); }
+      } catch (e) { if (e instanceof Budget) break withdrawals; print('retrait', p.name, String(e.message || e).split('\n')[0]); await page.keyboard.press('Escape').catch(() => {}); }
       await pause(15000, 30000);
     }
   }
-  if (mode === 'daily') await report('invitations', `${sent} invitation(s) envoyée(s) aujourd’hui`);
+  if (mode !== 'list') await report('invitations', `${sent} invitation(s) envoyée(s) à ce passage (${plan.today.invites + sent} aujourd’hui sur ${plan.config.invitesPerDay})`);
   // 3. Then build the target list (after the invitations: those must not wait behind 20 minutes of searches): schools still short of perSchool first-years, within the day's search budget
   const counts = { ...(plan.schoolCounts || {}) };
   let searches = 0;
-  const maxSearches = PORT !== '9333' ? 0 : mode === 'list' ? 400 : plan.config.searchesPerDay; // searches from the main account only
+  const maxSearches = PORT !== '9333' || mode === 'invite' ? 0 : mode === 'list' ? 400 : plan.config.searchesPerDay; // searches from the main account only
   for (const school of plan.config.schools) {
     if (searches >= maxSearches) break;
     if ((counts[school] ?? 0) >= plan.config.perSchool) continue;
@@ -244,7 +268,7 @@ if ((mode === 'daily' || mode === 'list') && !(PORT !== '9333' && mode === 'list
     const found = new Map();
     try {
     const plain = school.replace(/\s*\(.*?\)\s*/g, ' ').replace(/\s+[–—-]\s+.*$/, '').trim(); // “GEM (…)”, “BSB – Burgundy…” search badly
-    for (const q of [`1ère année ${plain}`, `Bachelor 1ère année ${plain}`, `first year ${plain}`]) {
+    for (const q of [`1ère année ${plain}`, `2ème année ${plain}`, `3ème année ${plain}`, `Bachelor ${plain}`, `first year ${plain}`]) {
       if (found.size + (counts[school] ?? 0) >= plan.config.perSchool || searches >= maxSearches) break;
       await nav('https://www.linkedin.com/search/results/people/?keywords=' + encodeURIComponent(q));
       searches++;
@@ -258,7 +282,7 @@ if ((mode === 'daily' || mode === 'list') && !(PORT !== '9333' && mode === 'list
     const take = [...found.values()].slice(0, Math.max(0, plan.config.perSchool - (counts[school] ?? 0)));
     const { added } = await api('/api/outreach/prospects', { method: 'POST', body: JSON.stringify({ prospects: take }) });
     counts[school] = (counts[school] ?? 0) + added;
-    await report('recherche', `${school} : ${counts[school]}/${plan.config.perSchool} étudiants de 1re année`);
+    await report('recherche', `${school} : ${counts[school]}/${plan.config.perSchool} étudiants de 1re à 3e année`);
   }
   const total = Object.values(counts).reduce((a, n) => a + n, 0);
   if (mode === 'list') await report('liste', `Liste construite : ${total} étudiants sur ${plan.config.schools.length * plan.config.perSchool} visés (${searches} recherches)`);
@@ -299,14 +323,36 @@ if (mode === 'watch' || mode === 'daily') {
       await page.getByRole('button', { name: /Afficher plus de résultats|Show more results/ }).filter({ visible: true }).first().click({ timeout: 2000 }).catch(() => {});
     }
     const slug = (u) => decodeURIComponent(u).toLowerCase().replace(/\/$/, '').split('/in/')[1];
-    const connections = new Set((await page.evaluate(() => [...document.querySelectorAll('main a[href*="/in/"]')].map((a) => a.href.split('?')[0]))).map(slug));
+    // Each connection's card carries its « Message » link: the conversation opens from here, without visiting the profile.
+    const cardsHere = await page.evaluate(() => {
+      const out = []; const seen = new Set();
+      for (const a of document.querySelectorAll('main a[href*="/in/"]')) {
+        const href = a.href.split('?')[0]; if (seen.has(href)) continue; seen.add(href);
+        let c = a, msg = null;
+        for (let i = 0; i < 8 && c && !msg; i++) { c = c.parentElement; if (c && c.querySelectorAll('a[href*="/in/"]').length > 3) break; msg = c?.querySelector('a[href*="/messaging/"]'); }
+        out.push({ href, msg: msg ? msg.getAttribute('href') : null });
+      }
+      return out;
+    });
+    const msgLink = new Map(cardsHere.map((c) => [slug(c.href), c.msg]));
+    const connections = new Set(msgLink.keys());
     let messaged = 0;
     for (const p of invited) {
-      if (messaged >= Math.min(plan.messagesLeft, 8)) break; // a few per pass: each one opens a profile
-      if (p.status !== 'accepted' && !connections.has(slug(p.linkedin))) continue; // accepted = already known as a connection
-      await setStatus(p.linkedin, 'accepted');
+      if (messaged >= Math.min(plan.messagesLeft, 8)) break; // a few per pass
+      const mem = memo(p);
+      if ((mem.fails || 0) >= 3) continue; // given up after 3 failures: Pierre was told, no endless retries
+      if (!connections.has(slug(p.linkedin))) {
+        if (p.status !== 'accepted') continue; // not accepted yet
+        // Marked accepted but not among the connections read on this pass: counted as a failure, no profile opened.
+        mem.fails = (mem.fails || 0) + 1; if (!DRY) saveSeen();
+        if (mem.fails >= 3) await report('à traiter', `${p.name} (${p.school}) : marqué « accepté » mais introuvable dans tes relations après 3 passages. Aucun message envoyé, à vérifier à la main : ${p.linkedin}`);
+        continue;
+      }
+      if (p.status !== 'accepted') await setStatus(p.linkedin, 'accepted');
       try {
-        await openThread(p.linkedin);
+        const link = msgLink.get(slug(p.linkedin));
+        if (!link) throw new Error('pas de lien Message sur la page des relations');
+        await openThread(link);
         const turns = await readThread(p);
         // The student already answered the invitation note, Pierre wrote by hand, or the message is already there:
         // no template on top of a real conversation. The replies pass below takes it from here.
@@ -319,7 +365,13 @@ if (mode === 'watch' || mode === 'daily') {
           await report('message', `Premier message envoyé à ${p.name} (${p.school})`);
         }
         await closeChats();
-      } catch (e) { await setStatus(p.linkedin, 'accepted', 'message non envoyé : ' + String(e.message || e).split('\n')[0]); }
+        if (mem.fails) { mem.fails = 0; if (!DRY) saveSeen(); }
+      } catch (e) {
+        const why = String(e.message || e).split('\n')[0];
+        mem.fails = (mem.fails || 0) + 1; if (!DRY) saveSeen();
+        await setStatus(p.linkedin, 'accepted', 'message non envoyé : ' + why);
+        if (mem.fails >= 3) await report('à traiter', `${p.name} (${p.school}) a accepté mais le premier message ne part pas (3 essais : ${why}). À toi de lui écrire : ${p.linkedin}`);
+      }
       await pause(20000, 45000);
     }
   }
@@ -407,4 +459,6 @@ if (mode === 'watch' || mode === 'replies') {
 }
 
 await page.close().catch(() => {});
+// A LinkedIn tab left open between two passes keeps growing (820 Mo on 22/11): leave it blank. The session is in the profile.
+if (process.platform === 'linux' && !DRY) for (const other of ctx.pages()) if (/linkedin\.com/.test(other.url())) await other.goto('about:blank').catch(() => {});
 process.exit(0);
